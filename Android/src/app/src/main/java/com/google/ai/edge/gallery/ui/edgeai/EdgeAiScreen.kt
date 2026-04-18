@@ -112,6 +112,14 @@ fun EdgeAiScreen(
   // send message via real inference
   fun sendMessage(text: String) {
     val model = activeModel ?: return
+    // Manually add the user message first so it shows in the bubble list
+    // AND so the ViewModel's "is last message an agent text?" guard correctly
+    // creates a fresh agent message for each turn instead of appending to the
+    // previous one (which caused all responses to merge into one paragraph).
+    llmChatViewModel.addMessage(
+      model = model,
+      message = ChatMessageText(content = text, side = ChatSide.USER),
+    )
     llmChatViewModel.generateResponse(
       model = model,
       input = text,

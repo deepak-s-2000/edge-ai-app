@@ -352,15 +352,19 @@ fun EdgeChatStream(
   streamingText: String,
 ) {
   val listState = rememberLazyListState()
+  // Use a fixed ID for the in-flight streaming bubble so LazyColumn doesn't
+  // destroy and recreate the item on every token — which would cause flicker
+  // and reset the scroll position.
+  val streamingMsgId = remember { "__streaming__" }
   val allMessages = remember(messages, streaming, streamingText) {
     if (streaming) {
-      messages + Message(role = "assistant", text = streamingText)
+      messages + Message(id = streamingMsgId, role = "assistant", text = streamingText)
     } else {
       messages
     }
   }
 
-  LaunchedEffect(allMessages.size) {
+  LaunchedEffect(allMessages.size, streamingText) {
     if (allMessages.isNotEmpty()) {
       listState.animateScrollToItem(allMessages.size - 1)
     }
@@ -396,10 +400,10 @@ private fun MessageBubble(
     ) {
       Box(
         modifier = Modifier
-          .widthIn(max = 300.dp)
+          .fillMaxWidth(0.82f)
           .clip(RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp))
-          .background(EdgeAccentSoft)
-          .border(1.dp, EdgeAccentBorder, RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp))
+          .background(Color(0xFF1F1208))
+          .border(1.dp, EdgeAccent.copy(alpha = 0.4f), RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp))
           .padding(horizontal = 16.dp, vertical = 10.dp),
       ) {
         Text(
@@ -408,6 +412,7 @@ private fun MessageBubble(
           fontSize = 14.sp,
           fontFamily = appFontFamily,
           lineHeight = 20.sp,
+          softWrap = true,
         )
       }
     }
@@ -443,7 +448,8 @@ private fun MessageBubble(
           color = EdgeText,
           fontSize = 14.sp,
           fontFamily = appFontFamily,
-          lineHeight = 21.sp,
+          lineHeight = 22.sp,
+          softWrap = true,
         )
 
         if (isStreaming) {
@@ -509,14 +515,6 @@ fun EdgeComposer(
         .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
       Column {
-        if (text.isEmpty()) {
-          Text(
-            text = "Message",
-            color = EdgeTextMute,
-            fontSize = 14.sp,
-            fontFamily = appFontFamily,
-          )
-        }
         BasicTextField(
           value = text,
           onValueChange = { text = it },
@@ -529,6 +527,20 @@ fun EdgeComposer(
           ),
           cursorBrush = SolidColor(EdgeAccent),
           maxLines = 6,
+          decorationBox = { innerTextField ->
+            Box {
+              if (text.isEmpty()) {
+                Text(
+                  text = "Message…",
+                  color = EdgeTextMute,
+                  fontSize = 14.sp,
+                  fontFamily = appFontFamily,
+                  lineHeight = 20.sp,
+                )
+              }
+              innerTextField()
+            }
+          },
         )
 
         Spacer(Modifier.height(10.dp))

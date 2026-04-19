@@ -1,5 +1,6 @@
 package com.google.ai.edge.gallery.ui.edgeai
 
+import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -20,6 +21,8 @@ import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import java.util.UUID
 import kotlinx.coroutines.launch
 
+private const val TAG = "EdgeAiScreen"
+
 /** Attachment carried with a user message. */
 sealed class EdgeAttachment {
   abstract val id: String
@@ -29,7 +32,8 @@ sealed class EdgeAttachment {
     override val id: String = UUID.randomUUID().toString(),
     val uri: android.net.Uri,
     override val fileName: String,
-    val bitmap: android.graphics.Bitmap,
+    val mimeType: String,
+    val sizeBytes: Long,
   ) : EdgeAttachment()
 
   data class Document(
@@ -96,6 +100,7 @@ fun EdgeAiScreen(
   var currentConversationId by remember { mutableStateOf<String?>(null) }
   var loadedHistoryMessages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var waitingForAssistant by remember { mutableStateOf(false) }
+  var sessionUserMessages by remember { mutableStateOf<List<Message>>(emptyList()) }
 
   // Resolve the LLM_CHAT task and active model
   val llmTask = mmState.tasks.find { it.id == BuiltInTaskId.LLM_CHAT }
@@ -122,27 +127,40 @@ fun EdgeAiScreen(
   LaunchedEffect(activeModel?.name) {
     val model = activeModel ?: return@LaunchedEffect
     val task = llmTask ?: return@LaunchedEffect
-    llmChatViewModel.resetSession(task = task, model = model)
+    llmChatViewModel.resetSession(
+      task = task,
+      model = model,
+      supportImage = model.llmSupportImage,
+    )
     // Clear conversation state when model changes
     currentConversationId = null
     loadedHistoryMessages = emptyList()
     waitingForAssistant = false
+    sessionUserMessages = emptyList()
   }
 
   // Convert real ChatMessages → simple Message type
-  val realMessages = activeModel?.let { model ->
+  val sessionMessages = activeModel?.let { model ->
+    var userMessageIndex = 0
     chatState.messagesByModel[model.name]
       ?.filterIsInstance<ChatMessageText>()
       ?.map { msg ->
-        Message(
-          role = if (msg.side == ChatSide.USER) "user" else "assistant",
-          text = msg.content,
-        )
+        if (msg.side == ChatSide.USER) {
+          sessionUserMessages.getOrNull(userMessageIndex++) ?: Message(
+            role = "user",
+            text = msg.content,
+          )
+        } else {
+          Message(
+            role = "assistant",
+            text = msg.content,
+          )
+        }
       } ?: emptyList()
   } ?: emptyList()
 
   // Displayed messages = historical (if viewing past conv) + live LLM messages
-  val displayedMessages = loadedHistoryMessages + realMessages
+  val displayedMessages = loadedHistoryMessages + sessionMessages
 
   val streamingText = activeModel?.let { model ->
     (chatState.streamingMessagesByModel[model.name] as? ChatMessageText)?.content ?: ""
@@ -156,7 +174,7 @@ fun EdgeAiScreen(
     if (!streaming && waitingForAssistant) {
       waitingForAssistant = false
       val convId = currentConversationId ?: return@LaunchedEffect
-      val lastMsg = (loadedHistoryMessages + realMessages).lastOrNull() ?: return@LaunchedEffect
+      val lastMsg = displayedMessages.lastOrNull() ?: return@LaunchedEffect
       if (lastMsg.role == "assistant") {
         chatHistoryViewModel.saveAssistantMessage(convId, lastMsg.text)
       }
@@ -165,40 +183,66 @@ fun EdgeAiScreen(
 
   fun sendMessage(text: String, attachments: List<EdgeAttachment> = emptyList()) {
     val model = activeModel ?: return
-    val displayTitle = text.ifBlank {
-      attachments.firstOrNull()?.fileName ?: "Attachment"
-    }.take(60)
-    val convId = currentConversationId ?: run {
-      val newId = UUID.randomUUID().toString()
-      chatHistoryViewModel.createConversation(
-        id = newId,
-        title = displayTitle,
-        modelName = activeModelName,
-      )
-      currentConversationId = newId
-      newId
-    }
-    chatHistoryViewModel.saveUserMessage(convId, text)
-    waitingForAssistant = true
+    scope.launch {
+      try {
+        val userVisibleText = text.trim()
+        val fallbackPrompt = when {
+          attachments.filterIsInstance<EdgeAttachment.Image>().isNotEmpty() &&
+            attachments.filterIsInstance<EdgeAttachment.Document>().isNotEmpty() ->
+              "Please review the attached images and documents."
+          attachments.filterIsInstance<EdgeAttachment.Image>().isNotEmpty() ->
+              "Please review the attached image(s)."
+          attachments.filterIsInstance<EdgeAttachment.Document>().isNotEmpty() ->
+              "Please review the attached document(s)."
+          else -> ""
+        }
+        val promptText = userVisibleText.ifBlank { fallbackPrompt }
+        val displayTitle = userVisibleText.ifBlank {
+          attachments.firstOrNull()?.fileName ?: "Attachment"
+        }.take(60)
+        val convId = currentConversationId ?: run {
+          val newId = UUID.randomUUID().toString()
+          chatHistoryViewModel.createConversation(
+            id = newId,
+            title = displayTitle,
+            modelName = activeModelName,
+          )
+          currentConversationId = newId
+          newId
+        }
+        sessionUserMessages = sessionUserMessages + Message(
+          role = "user",
+          text = userVisibleText,
+          attachments = attachments,
+        )
+        chatHistoryViewModel.saveUserMessage(convId, userVisibleText)
+        waitingForAssistant = true
 
-    // Build LLM input: text + attachment context
-    val llmInput = buildString {
-      append(text)
-      val docs = attachments.filterIsInstance<EdgeAttachment.Document>()
-      val imgs = attachments.filterIsInstance<EdgeAttachment.Image>()
-      if (imgs.isNotEmpty()) append("\n[${imgs.size} image(s) attached]")
-      if (docs.isNotEmpty()) append("\n[Attached files: ${docs.joinToString { it.fileName }}]")
-    }
+        val imageBitmaps = loadImageAttachmentBitmaps(context, attachments)
+        val llmInput = buildString {
+          append(promptText)
+          val docs = attachments.filterIsInstance<EdgeAttachment.Document>()
+          val imgs = attachments.filterIsInstance<EdgeAttachment.Image>()
+          if (imgs.isNotEmpty()) append("\n[${imgs.size} image(s) attached]")
+          if (docs.isNotEmpty()) append("\n[Attached files: ${docs.joinToString { it.fileName }}]")
+          append(buildAttachmentPromptContext(context, attachments))
+        }
 
-    llmChatViewModel.addMessage(
-      model = model,
-      message = ChatMessageText(content = text, side = ChatSide.USER),
-    )
-    llmChatViewModel.generateResponse(
-      model = model,
-      input = llmInput,
-      onError = {},
-    )
+        llmChatViewModel.addMessage(
+          model = model,
+          message = ChatMessageText(content = promptText, side = ChatSide.USER),
+        )
+        llmChatViewModel.generateResponse(
+          model = model,
+          input = llmInput,
+          images = imageBitmaps,
+          onError = {},
+        )
+      } catch (e: Exception) {
+        waitingForAssistant = false
+        Log.e(TAG, "Failed to send message with attachments", e)
+      }
+    }
   }
 
   fun newChat() {
@@ -207,7 +251,12 @@ fun EdgeAiScreen(
     currentConversationId = null
     loadedHistoryMessages = emptyList()
     waitingForAssistant = false
-    llmChatViewModel.resetSession(task = task, model = model)
+    sessionUserMessages = emptyList()
+    llmChatViewModel.resetSession(
+      task = task,
+      model = model,
+      supportImage = model.llmSupportImage,
+    )
   }
 
   fun openConversation(conv: ConversationEntity) {
@@ -218,9 +267,14 @@ fun EdgeAiScreen(
       }
       currentConversationId = conv.id
       waitingForAssistant = false
+      sessionUserMessages = emptyList()
       val model = activeModel ?: return@launch
       val task = llmTask ?: return@launch
-      llmChatViewModel.resetSession(task = task, model = model)
+      llmChatViewModel.resetSession(
+        task = task,
+        model = model,
+        supportImage = model.llmSupportImage,
+      )
       drawerOpen = false
       screen = EdgeScreen.CHAT
     }

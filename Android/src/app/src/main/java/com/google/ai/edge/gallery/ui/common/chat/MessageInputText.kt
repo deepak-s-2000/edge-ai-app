@@ -27,6 +27,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -62,6 +63,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -70,23 +72,25 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.FlipCameraAndroid
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Photo
 import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -111,6 +115,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -124,6 +130,7 @@ import com.google.ai.edge.gallery.common.AudioClip
 import com.google.ai.edge.gallery.common.convertWavToMonoWithMaxSeconds
 import com.google.ai.edge.gallery.common.decodeSampledBitmapFromUri
 import com.google.ai.edge.gallery.common.rotateBitmap
+import com.google.ai.edge.gallery.data.MAX_ATTACHMENT_COUNT
 import com.google.ai.edge.gallery.data.MAX_AUDIO_CLIP_COUNT
 import com.google.ai.edge.gallery.data.MAX_IMAGE_COUNT
 import com.google.ai.edge.gallery.data.MAX_IMAGE_COUNT_AI_CORE
@@ -137,6 +144,13 @@ import java.io.FileInputStream
 import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+
+data class DocumentAttachmentInfo(
+  val uri: Uri,
+  val fileName: String,
+  val mimeType: String,
+  val sizeBytes: Long,
+)
 
 private const val TAG = "AGMessageInputText"
 
@@ -179,7 +193,7 @@ fun MessageInputText(
   val lifecycleOwner = LocalLifecycleOwner.current
   val scope = rememberCoroutineScope()
   val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
-  var showAddContentMenu by remember { mutableStateOf(false) }
+  var showAttachmentSheet by remember { mutableStateOf(false) }
   var showTextInputHistorySheet by remember { mutableStateOf(false) }
   var showCameraCaptureBottomSheet by remember { mutableStateOf(false) }
   val cameraCaptureSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -187,6 +201,7 @@ fun MessageInputText(
   val audioRecorderSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var pickedImages by remember { mutableStateOf<List<Bitmap>>(listOf()) }
   var pickedAudioClips by remember { mutableStateOf<List<AudioClip>>(listOf()) }
+  var pickedDocuments by remember { mutableStateOf<List<DocumentAttachmentInfo>>(listOf()) }
   var hasFrontCamera by remember { mutableStateOf(false) }
   val sensorObserver = remember { SensorObserver(context) }
 
@@ -226,6 +241,12 @@ fun MessageInputText(
       }
   }
 
+  val updatePickedDocuments: (List<DocumentAttachmentInfo>) -> Unit = { docs ->
+    val currentTotal = pickedImages.size + pickedDocuments.size
+    val remaining = (MAX_ATTACHMENT_COUNT - currentTotal).coerceAtLeast(0)
+    pickedDocuments = (pickedDocuments + docs).take(pickedDocuments.size + remaining)
+  }
+
   LaunchedEffect(Unit) { checkFrontCamera(context = context, callback = { hasFrontCamera = it }) }
 
   LaunchedEffect(pickedImages) { onPickedImagesChanged(pickedImages) }
@@ -237,13 +258,13 @@ fun MessageInputText(
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
       permissionGranted ->
       if (permissionGranted) {
-        showAddContentMenu = false
+        showAttachmentSheet = false
         showCameraCaptureBottomSheet = true
       }
     }
 
   val handleClickRecordAudioClip = {
-    showAddContentMenu = false
+    showAttachmentSheet = false
     showAudioRecorder = true
     onSetAudioRecorderVisible(true)
   }
@@ -299,14 +320,48 @@ fun MessageInputText(
       }
     }
 
+  val pickDocuments =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+      if (result.resultCode == android.app.Activity.RESULT_OK) {
+        result.data?.let { intent ->
+          val uris = mutableListOf<Uri>()
+          intent.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+          } ?: intent.data?.let { uris.add(it) }
+
+          val docs =
+            uris.mapNotNull { uri ->
+              try {
+                val fileName = getFileName(context, uri)
+                val mimeType =
+                  context.contentResolver.getType(uri) ?: "application/octet-stream"
+                val sizeBytes = getFileSize(context, uri)
+                DocumentAttachmentInfo(
+                  uri = uri,
+                  fileName = fileName,
+                  mimeType = mimeType,
+                  sizeBytes = sizeBytes,
+                )
+              } catch (e: Exception) {
+                Log.e(TAG, "Failed to read document info", e)
+                null
+              }
+            }
+          if (docs.isNotEmpty()) updatePickedDocuments(docs)
+        }
+      }
+    }
+
   DisposableEffect(lifecycleOwner) {
     lifecycleOwner.lifecycle.addObserver(sensorObserver)
     onDispose { lifecycleOwner.lifecycle.removeObserver(sensorObserver) }
   }
 
   Column {
-    // A preview panel for the selected images and audio clips.
-    if (pickedImages.isNotEmpty() || pickedAudioClips.isNotEmpty()) {
+    // A preview panel for the selected images, audio clips, and documents.
+    if (pickedImages.isNotEmpty() || pickedAudioClips.isNotEmpty() || pickedDocuments.isNotEmpty()) {
       Row(
         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -348,6 +403,46 @@ fun MessageInputText(
               pickedAudioClips = pickedAudioClips.filterIndexed { curIndex, curAudioData ->
                 curIndex != index
               }
+            }
+          }
+        }
+
+        for ((index, doc) in pickedDocuments.withIndex()) {
+          Box(contentAlignment = Alignment.TopEnd) {
+            Row(
+              modifier =
+                Modifier.shadow(2.dp, shape = RoundedCornerShape(8.dp))
+                  .clip(RoundedCornerShape(8.dp))
+                  .background(MaterialTheme.colorScheme.surface)
+                  .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+                  .padding(horizontal = 12.dp, vertical = 8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              Icon(
+                documentIconForMimeType(doc.mimeType),
+                contentDescription = null,
+                modifier = Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.primary,
+              )
+              Column(modifier = Modifier.widthIn(max = 120.dp)) {
+                Text(
+                  doc.fileName,
+                  style = MaterialTheme.typography.bodySmall,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+                if (doc.sizeBytes > 0) {
+                  Text(
+                    formatFileSizeForDisplay(doc.sizeBytes),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                  )
+                }
+              }
+            }
+            MediaPanelCloseButton {
+              pickedDocuments = pickedDocuments.filterIndexed { i, _ -> i != index }
             }
           }
         }
@@ -405,198 +500,32 @@ fun MessageInputText(
                   verticalAlignment = Alignment.CenterVertically,
                   horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                  // A plus button to show a popup menu to add stuff to the chat.
-                  Box() {
-                    val enableAddButton = !inProgress && !isResettingSession && !modelInitializing
-                    OutlinedIconButton(
-                      enabled = enableAddButton,
-                      onClick = { showAddContentMenu = true },
-                      colors =
-                        IconButtonDefaults.iconButtonColors(
-                          disabledContentColor =
-                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
-                        ),
-                      border =
-                        IconButtonDefaults.outlinedIconButtonBorder(true)
-                          .copy(
-                            brush =
-                              SolidColor(
-                                MaterialTheme.colorScheme.outlineVariant.copy(
-                                  alpha = if (enableAddButton) 1f else 0.1f
-                                )
-                              )
-                          ),
-                    ) {
-                      Icon(
-                        Icons.Outlined.Add,
-                        contentDescription = stringResource(R.string.cd_add_content_icon),
-                        modifier = Modifier.size(24.dp),
-                      )
-                    }
-
-                    DropdownMenu(
-                      expanded = showAddContentMenu,
-                      onDismissRequest = { showAddContentMenu = false },
-                    ) {
-                      if (showImagePicker) {
-                        val isImageLimitExceededForAiCore =
-                          modelManagerUiState.selectedModel.runtimeType == RuntimeType.AICORE &&
-                            (imageCount + pickedImages.size) >= MAX_IMAGE_COUNT_AI_CORE
-                        val enableAddImageMenuItems =
-                          (imageCount + pickedImages.size) < MAX_IMAGE_COUNT
-                        // Take a picture.
-                        DropdownMenuItem(
-                          text = {
-                            Row(
-                              verticalAlignment = Alignment.CenterVertically,
-                              horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                              Icon(Icons.Rounded.PhotoCamera, contentDescription = null)
-                              Text("Take a picture")
-                            }
-                          },
-                          enabled = enableAddImageMenuItems,
-                          onClick = {
-                            if (isImageLimitExceededForAiCore) {
-                              onImageLimitExceeded()
-                              showAddContentMenu = false
-                              return@DropdownMenuItem
-                            }
-                            // Check permission
-                            when (PackageManager.PERMISSION_GRANTED) {
-                              // Already got permission. Call the lambda.
-                              ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.CAMERA,
-                              ) -> {
-                                showAddContentMenu = false
-                                showCameraCaptureBottomSheet = true
-                              }
-
-                              // Otherwise, ask for permission
-                              else -> {
-                                takePicturePermissionLauncher.launch(Manifest.permission.CAMERA)
-                              }
-                            }
-                          },
-                        )
-
-                        // Pick an image from album.
-                        DropdownMenuItem(
-                          text = {
-                            Row(
-                              verticalAlignment = Alignment.CenterVertically,
-                              horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                              Icon(Icons.Rounded.Photo, contentDescription = null)
-                              Text("Pick from album")
-                            }
-                          },
-                          enabled = enableAddImageMenuItems,
-                          onClick = {
-                            if (isImageLimitExceededForAiCore) {
-                              onImageLimitExceeded()
-                              showAddContentMenu = false
-                              return@DropdownMenuItem
-                            }
-                            // Launch the photo picker and let the user choose only images.
-                            pickMedia.launch(
-                              PickVisualMediaRequest(
-                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                  // A plus button to open the attachment picker sheet.
+                  val enableAddButton = !inProgress && !isResettingSession && !modelInitializing
+                  OutlinedIconButton(
+                    enabled = enableAddButton,
+                    onClick = { showAttachmentSheet = true },
+                    colors =
+                      IconButtonDefaults.iconButtonColors(
+                        disabledContentColor =
+                          MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
+                      ),
+                    border =
+                      IconButtonDefaults.outlinedIconButtonBorder(true)
+                        .copy(
+                          brush =
+                            SolidColor(
+                              MaterialTheme.colorScheme.outlineVariant.copy(
+                                alpha = if (enableAddButton) 1f else 0.1f
                               )
                             )
-                            showAddContentMenu = false
-                          },
-                        )
-                      }
-
-                      // Audio related menu items.
-                      if (showAudioPicker) {
-                        val enableRecordAudioClipMenuItems =
-                          (audioClipMessageCount + pickedAudioClips.size) < MAX_AUDIO_CLIP_COUNT
-                        DropdownMenuItem(
-                          text = {
-                            Row(
-                              verticalAlignment = Alignment.CenterVertically,
-                              horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                              Icon(Icons.Rounded.Mic, contentDescription = null)
-                              Text("Record audio clip")
-                            }
-                          },
-                          enabled = enableRecordAudioClipMenuItems,
-                          onClick = {
-                            // Check permission
-                            when (PackageManager.PERMISSION_GRANTED) {
-                              // Already got permission. Call the lambda.
-                              ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.RECORD_AUDIO,
-                              ) -> {
-                                handleClickRecordAudioClip()
-                              }
-
-                              // Otherwise, ask for permission
-                              else -> {
-                                recordAudioClipsPermissionLauncher.launch(
-                                  Manifest.permission.RECORD_AUDIO
-                                )
-                              }
-                            }
-                          },
-                        )
-
-                        DropdownMenuItem(
-                          text = {
-                            Row(
-                              verticalAlignment = Alignment.CenterVertically,
-                              horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                              Icon(Icons.Rounded.AudioFile, contentDescription = null)
-                              Text("Pick wav file")
-                            }
-                          },
-                          enabled = enableRecordAudioClipMenuItems,
-                          onClick = {
-                            showAddContentMenu = false
-
-                            // Show file picker.
-                            val intent =
-                              Intent(Intent.ACTION_GET_CONTENT).apply {
-                                addCategory(Intent.CATEGORY_OPENABLE)
-                                type = "audio/*"
-
-                                // Provide a list of more specific MIME types to filter for.
-                                val mimeTypes = arrayOf("audio/wav", "audio/x-wav")
-                                putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
-
-                                // Single select.
-                                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
-                                  .addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-                                  .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                              }
-                            pickWav.launch(intent)
-                          },
-                        )
-                      }
-
-                      // Prompt history.
-                      DropdownMenuItem(
-                        text = {
-                          Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                          ) {
-                            Icon(Icons.Rounded.History, contentDescription = null)
-                            Text("Input history")
-                          }
-                        },
-                        onClick = {
-                          showAddContentMenu = false
-                          showTextInputHistorySheet = true
-                        },
-                      )
-                    }
+                        ),
+                  ) {
+                    Icon(
+                      Icons.Outlined.Add,
+                      contentDescription = stringResource(R.string.cd_add_content_icon),
+                      modifier = Modifier.size(24.dp),
+                    )
                   }
 
                   // Skills.
@@ -634,18 +563,23 @@ fun MessageInputText(
                     enabled =
                       !inProgress &&
                         !isResettingSession &&
-                        (curMessage.isNotEmpty() || pickedAudioClips.isNotEmpty()),
+                        (curMessage.isNotEmpty() ||
+                          pickedAudioClips.isNotEmpty() ||
+                          pickedImages.isNotEmpty() ||
+                          pickedDocuments.isNotEmpty()),
                     onClick = {
                       var message = curMessage.trim()
                       onSendMessage(
                         createMessagesToSend(
                           pickedImages = pickedImages,
                           audioClips = pickedAudioClips,
+                          documents = pickedDocuments,
                           text = message,
                         )
                       )
                       pickedImages = listOf()
                       pickedAudioClips = listOf()
+                      pickedDocuments = listOf()
                     },
                     colors =
                       IconButtonDefaults.iconButtonColors(
@@ -699,15 +633,113 @@ fun MessageInputText(
           createMessagesToSend(
             pickedImages = pickedImages,
             audioClips = pickedAudioClips,
+            documents = pickedDocuments,
             text = item,
           )
         )
         pickedImages = listOf()
         pickedAudioClips = listOf()
+        pickedDocuments = listOf()
         modelManagerViewModel.promoteTextInputHistoryItem(item)
       },
       onHistoryItemDeleted = { item -> modelManagerViewModel.deleteTextInputHistory(item) },
       onHistoryItemsDeleteAll = { modelManagerViewModel.clearTextInputHistory() },
+    )
+  }
+
+  if (showAttachmentSheet) {
+    val isAiCore =
+      modelManagerUiState.selectedModel.runtimeType == RuntimeType.AICORE
+    val isImageLimitExceeded =
+      if (isAiCore) {
+        (imageCount + pickedImages.size) >= MAX_IMAGE_COUNT_AI_CORE
+      } else {
+        (pickedImages.size + pickedDocuments.size) >= MAX_ATTACHMENT_COUNT
+      }
+    AttachmentPickerSheet(
+      showImagePicker = showImagePicker,
+      showAudioPicker = showAudioPicker,
+      canAddMore = !isImageLimitExceeded,
+      onDismiss = { showAttachmentSheet = false },
+      onPickPhotos = {
+        showAttachmentSheet = false
+        if (isImageLimitExceeded) {
+          onImageLimitExceeded()
+        } else {
+          pickMedia.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+          )
+        }
+      },
+      onTakePhoto = {
+        showAttachmentSheet = false
+        if (isImageLimitExceeded) {
+          onImageLimitExceeded()
+        } else {
+          when (
+            PackageManager.PERMISSION_GRANTED
+          ) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) -> {
+              showCameraCaptureBottomSheet = true
+            }
+            else -> takePicturePermissionLauncher.launch(Manifest.permission.CAMERA)
+          }
+        }
+      },
+      onPickDocuments = {
+        showAttachmentSheet = false
+        val intent =
+          Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+              Intent.EXTRA_MIME_TYPES,
+              arrayOf(
+                "application/pdf",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "text/plain",
+                "text/csv",
+                "application/vnd.ms-excel",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-powerpoint",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+              ),
+            )
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+              .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          }
+        pickDocuments.launch(intent)
+      },
+      onRecordAudio = {
+        showAttachmentSheet = false
+        when (
+          PackageManager.PERMISSION_GRANTED
+        ) {
+          ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) -> {
+            handleClickRecordAudioClip()
+          }
+          else ->
+            recordAudioClipsPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+      },
+      onPickWav = {
+        showAttachmentSheet = false
+        val intent =
+          Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "audio/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/wav", "audio/x-wav"))
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
+              .addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+              .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          }
+        pickWav.launch(intent)
+      },
+      onShowHistory = {
+        showAttachmentSheet = false
+        showTextInputHistorySheet = true
+      },
     )
   }
 
@@ -987,6 +1019,192 @@ private fun resizeBitmap(originalBitmap: Bitmap, size: Int = 1024): Bitmap {
   return originalBitmap.scale(newWidth, newHeight)
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AttachmentPickerSheet(
+  showImagePicker: Boolean,
+  showAudioPicker: Boolean,
+  canAddMore: Boolean,
+  onDismiss: () -> Unit,
+  onPickPhotos: () -> Unit,
+  onTakePhoto: () -> Unit,
+  onPickDocuments: () -> Unit,
+  onRecordAudio: () -> Unit,
+  onPickWav: () -> Unit,
+  onShowHistory: () -> Unit,
+) {
+  ModalBottomSheet(onDismissRequest = onDismiss) {
+    Column(
+      modifier =
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 36.dp),
+      verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+      Text(
+        text = "Add attachment",
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.align(Alignment.CenterHorizontally),
+      )
+
+      if (showImagePicker) {
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(12.dp),
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          OutlinedCard(
+            onClick = onPickPhotos,
+            enabled = canAddMore,
+            modifier = Modifier.weight(1f),
+          ) {
+            Column(
+              horizontalAlignment = Alignment.CenterHorizontally,
+              modifier = Modifier.padding(vertical = 20.dp).fillMaxWidth(),
+            ) {
+              Icon(
+                Icons.Rounded.Photo,
+                contentDescription = null,
+                modifier = Modifier.size(36.dp),
+                tint =
+                  if (canAddMore) MaterialTheme.colorScheme.primary
+                  else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+              )
+              Spacer(modifier = Modifier.height(8.dp))
+              Text(
+                "Photos",
+                style = MaterialTheme.typography.bodyMedium,
+                color =
+                  if (canAddMore) MaterialTheme.colorScheme.onSurface
+                  else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+              )
+            }
+          }
+
+          OutlinedCard(
+            onClick = onPickDocuments,
+            enabled = canAddMore,
+            modifier = Modifier.weight(1f),
+          ) {
+            Column(
+              horizontalAlignment = Alignment.CenterHorizontally,
+              modifier = Modifier.padding(vertical = 20.dp).fillMaxWidth(),
+            ) {
+              Icon(
+                Icons.Rounded.Description,
+                contentDescription = null,
+                modifier = Modifier.size(36.dp),
+                tint =
+                  if (canAddMore) MaterialTheme.colorScheme.primary
+                  else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+              )
+              Spacer(modifier = Modifier.height(8.dp))
+              Text(
+                "Documents",
+                style = MaterialTheme.typography.bodyMedium,
+                color =
+                  if (canAddMore) MaterialTheme.colorScheme.onSurface
+                  else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+              )
+            }
+          }
+        }
+
+        OutlinedCard(
+          onClick = onTakePhoto,
+          enabled = canAddMore,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp).fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+          ) {
+            Icon(
+              Icons.Rounded.PhotoCamera,
+              contentDescription = null,
+              tint =
+                if (canAddMore) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            )
+            Text(
+              "Take a photo",
+              style = MaterialTheme.typography.bodyMedium,
+              color =
+                if (canAddMore) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            )
+          }
+        }
+      }
+
+      if (showAudioPicker) {
+        OutlinedCard(onClick = onRecordAudio, modifier = Modifier.fillMaxWidth()) {
+          Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp).fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+          ) {
+            Icon(Icons.Rounded.Mic, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Text("Record audio clip", style = MaterialTheme.typography.bodyMedium)
+          }
+        }
+
+        OutlinedCard(onClick = onPickWav, modifier = Modifier.fillMaxWidth()) {
+          Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp).fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+          ) {
+            Icon(Icons.Rounded.AudioFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Text("Pick wav file", style = MaterialTheme.typography.bodyMedium)
+          }
+        }
+      }
+
+      HorizontalDivider()
+
+      TextButton(
+        onClick = onShowHistory,
+        modifier = Modifier.align(Alignment.CenterHorizontally),
+      ) {
+        Icon(Icons.Rounded.History, contentDescription = null)
+        Spacer(modifier = Modifier.width(6.dp))
+        Text("Input history")
+      }
+    }
+  }
+}
+
+private fun getFileName(context: Context, uri: Uri): String {
+  var result: String? = null
+  if (uri.scheme == "content") {
+    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (idx != -1) result = cursor.getString(idx)
+      }
+    }
+  }
+  if (result == null) {
+    result = uri.path
+    val cut = result?.lastIndexOf('/')
+    if (cut != null && cut != -1) result = result?.substring(cut + 1)
+  }
+  return result ?: "Unknown file"
+}
+
+private fun getFileSize(context: Context, uri: Uri): Long {
+  var size = 0L
+  if (uri.scheme == "content") {
+    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (idx != -1) size = cursor.getLong(idx)
+      }
+    }
+  }
+  return size
+}
+
 private fun checkFrontCamera(context: Context, callback: (Boolean) -> Unit) {
   val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
   cameraProviderFuture.addListener(
@@ -1008,13 +1226,13 @@ private fun checkFrontCamera(context: Context, callback: (Boolean) -> Unit) {
 private fun createMessagesToSend(
   pickedImages: List<Bitmap>,
   audioClips: List<AudioClip>,
+  documents: List<DocumentAttachmentInfo> = listOf(),
   text: String,
 ): List<ChatMessage> {
   val messages: MutableList<ChatMessage> = mutableListOf()
 
   // Add image message.
   if (pickedImages.isNotEmpty()) {
-    // Cap the number of image messages.
     var curPickedImages = pickedImages.toList()
     if (curPickedImages.size > MAX_IMAGE_COUNT) {
       curPickedImages = curPickedImages.subList(fromIndex = 0, toIndex = MAX_IMAGE_COUNT)
@@ -1041,11 +1259,22 @@ private fun createMessagesToSend(
       )
     }
   }
-  // Cap the number of audio messages.
   if (audioMessages.size > MAX_AUDIO_CLIP_COUNT) {
     audioMessages = audioMessages.subList(fromIndex = 0, toIndex = MAX_AUDIO_CLIP_COUNT)
   }
   messages.addAll(audioMessages)
+
+  // Add document messages.
+  for (doc in documents) {
+    messages.add(
+      ChatMessageDocument(
+        fileName = doc.fileName,
+        mimeType = doc.mimeType,
+        sizeBytes = doc.sizeBytes,
+        side = ChatSide.USER,
+      )
+    )
+  }
 
   if (text.isNotEmpty()) {
     messages.add(ChatMessageText(content = text, side = ChatSide.USER))

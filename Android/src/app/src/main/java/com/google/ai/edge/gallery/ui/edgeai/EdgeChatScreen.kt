@@ -16,12 +16,15 @@
 
 package com.google.ai.edge.gallery.ui.edgeai
 
+import android.content.Intent
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,7 +46,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -54,7 +56,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
@@ -75,12 +76,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.ai.edge.gallery.data.MAX_ATTACHMENT_COUNT
 import com.google.ai.edge.gallery.data.chathistory.ConversationEntity
 import com.google.ai.edge.gallery.ui.theme.appFontFamily
 
@@ -99,7 +102,7 @@ fun EdgeChatScreen(
   onMenuClick: () -> Unit,
   onDrawerClose: () -> Unit,
   onNewChat: () -> Unit,
-  onSend: (String) -> Unit,
+  onSend: (String, List<EdgeAttachment>) -> Unit,
   onModelChipClick: () -> Unit,
   onVoiceClick: () -> Unit,
   onModelsNav: () -> Unit,
@@ -129,7 +132,7 @@ fun EdgeChatScreen(
 
       Box(modifier = Modifier.weight(1f)) {
         if (messages.isEmpty() && !streaming) {
-          EdgeChatLanding(onSuggestion = onSend)
+          EdgeChatLanding(onSuggestion = { onSend(it, emptyList()) })
         } else {
           EdgeChatStream(
             messages = messages,
@@ -425,14 +428,19 @@ private fun MessageBubble(
           .border(1.dp, EdgeAccent.copy(alpha = 0.4f), RoundedCornerShape(18.dp, 4.dp, 18.dp, 18.dp))
           .padding(horizontal = 16.dp, vertical = 10.dp),
       ) {
-        Text(
-          text = message.text,
-          color = EdgeText,
-          fontSize = 14.sp,
-          fontFamily = appFontFamily,
-          lineHeight = 20.sp,
-          softWrap = true,
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          AttachmentBubbles(message.attachments)
+          if (message.text.isNotBlank()) {
+            Text(
+              text = message.text,
+              color = EdgeText,
+              fontSize = 14.sp,
+              fontFamily = appFontFamily,
+              lineHeight = 20.sp,
+              softWrap = true,
+            )
+          }
+        }
       }
     }
   } else {
@@ -505,12 +513,57 @@ private fun StreamingCursor() {
 
 @Composable
 fun EdgeComposer(
-  onSend: (String) -> Unit,
+  onSend: (String, List<EdgeAttachment>) -> Unit,
   onVoiceClick: () -> Unit,
   streaming: Boolean,
   activeModelName: String,
 ) {
+  val context = LocalContext.current
   var text by remember { mutableStateOf("") }
+  var attachments by remember { mutableStateOf<List<EdgeAttachment>>(emptyList()) }
+  var showAttachmentPicker by remember { mutableStateOf(false) }
+
+  val remainingSlots = (MAX_ATTACHMENT_COUNT - attachments.size).coerceAtLeast(0)
+
+  val imagePickerLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+      val data = result.data ?: return@rememberLauncherForActivityResult
+      val uris = buildList {
+        data.clipData?.let { clipData ->
+          for (index in 0 until clipData.itemCount) {
+            add(clipData.getItemAt(index).uri)
+          }
+        } ?: data.data?.let { add(it) }
+      }
+      if (uris.isNotEmpty()) {
+        attachments = attachments + uris
+          .take(remainingSlots)
+          .map { uri ->
+            takePersistablePermission(context, data, uri)
+            getPersistedEdgeAttachment(context, uri, preferDocument = false)
+          }
+      }
+    }
+
+  val documentPickerLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+      val data = result.data ?: return@rememberLauncherForActivityResult
+      val uris = buildList {
+        data.clipData?.let { clipData ->
+          for (index in 0 until clipData.itemCount) {
+            add(clipData.getItemAt(index).uri)
+          }
+        } ?: data.data?.let { add(it) }
+      }
+      if (uris.isNotEmpty()) {
+        attachments = attachments + uris
+          .take(remainingSlots)
+          .map { uri ->
+            takePersistablePermission(context, data, uri)
+            getPersistedEdgeAttachment(context, uri, preferDocument = true)
+          }
+      }
+    }
 
   Column(
     modifier = Modifier
@@ -528,6 +581,14 @@ fun EdgeComposer(
         .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
       Column {
+        AttachmentPreviewRow(
+          attachments = attachments,
+          onRemove = { removed -> attachments = attachments.filterNot { it.id == removed.id } },
+        )
+        if (attachments.isNotEmpty()) {
+          Spacer(Modifier.height(10.dp))
+        }
+
         BasicTextField(
           value = text,
           onValueChange = { text = it },
@@ -562,14 +623,13 @@ fun EdgeComposer(
           modifier = Modifier.fillMaxWidth(),
           verticalAlignment = Alignment.CenterVertically,
         ) {
-          // + button
           Box(
             modifier = Modifier
               .size(34.dp)
               .clip(CircleShape)
               .background(EdgeSurface2)
               .border(1.dp, EdgeBorderStrong, CircleShape)
-              .clickable { /* attachment menu */ },
+              .clickable(enabled = remainingSlots > 0) { showAttachmentPicker = true },
             contentAlignment = Alignment.Center,
           ) {
             Icon(
@@ -582,27 +642,16 @@ fun EdgeComposer(
 
           Spacer(Modifier.width(8.dp))
 
-          // Image button
-          Box(
-            modifier = Modifier
-              .size(34.dp)
-              .clip(CircleShape)
-              .background(EdgeSurface2)
-              .border(1.dp, EdgeBorderStrong, CircleShape)
-              .clickable { /* image pick */ },
-            contentAlignment = Alignment.Center,
-          ) {
-            Icon(
-              imageVector = Icons.Default.Image,
-              contentDescription = "Image",
-              tint = EdgeTextDim,
-              modifier = Modifier.size(18.dp),
+          if (attachments.isNotEmpty()) {
+            Text(
+              text = "${attachments.size}/$MAX_ATTACHMENT_COUNT",
+              color = EdgeTextMute,
+              fontSize = 11.sp,
+              fontFamily = FontFamily.Monospace,
             )
+            Spacer(Modifier.width(8.dp))
           }
 
-          Spacer(Modifier.width(8.dp))
-
-          // Mic button
           Box(
             modifier = Modifier
               .size(34.dp)
@@ -627,16 +676,27 @@ fun EdgeComposer(
             modifier = Modifier
               .size(36.dp)
               .clip(CircleShape)
-              .background(if (text.isNotBlank() && !streaming) EdgeAccent else EdgeSurface2)
+              .background(
+                if ((text.isNotBlank() || attachments.isNotEmpty()) && !streaming) {
+                  EdgeAccent
+                } else {
+                  EdgeSurface2
+                }
+              )
               .border(
                 1.dp,
-                if (text.isNotBlank() && !streaming) Color.Transparent else EdgeBorderStrong,
+                if ((text.isNotBlank() || attachments.isNotEmpty()) && !streaming) {
+                  Color.Transparent
+                } else {
+                  EdgeBorderStrong
+                },
                 CircleShape
               )
               .clickable {
-                if (text.isNotBlank() && !streaming) {
-                  onSend(text)
+                if ((text.isNotBlank() || attachments.isNotEmpty()) && !streaming) {
+                  onSend(text, attachments)
                   text = ""
+                  attachments = emptyList()
                 }
               },
             contentAlignment = Alignment.Center,
@@ -644,7 +704,11 @@ fun EdgeComposer(
             Icon(
               imageVector = Icons.Default.Send,
               contentDescription = "Send",
-              tint = if (text.isNotBlank() && !streaming) Color.Black else EdgeTextMute,
+              tint = if ((text.isNotBlank() || attachments.isNotEmpty()) && !streaming) {
+                Color.Black
+              } else {
+                EdgeTextMute
+              },
               modifier = Modifier.size(17.dp),
             )
           }
@@ -680,6 +744,64 @@ fun EdgeComposer(
     }
 
     Spacer(Modifier.height(8.dp))
+  }
+
+  if (showAttachmentPicker) {
+    AttachmentPickerSheet(
+      onDismiss = { showAttachmentPicker = false },
+      onPickPhotos = {
+        showAttachmentPicker = false
+        imagePickerLauncher.launch(
+          Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+          }
+        )
+      },
+      onPickDocuments = {
+        showAttachmentPicker = false
+        documentPickerLauncher.launch(
+          Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            putExtra(
+              Intent.EXTRA_MIME_TYPES,
+              arrayOf(
+                "application/pdf",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "text/plain",
+                "text/csv",
+                "application/vnd.ms-excel",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-powerpoint",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+              ),
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+          }
+        )
+      },
+    )
+  }
+}
+
+private fun takePersistablePermission(
+  context: android.content.Context,
+  intent: Intent,
+  uri: android.net.Uri,
+) {
+  val modeFlags = intent.flags and
+    (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+  if (modeFlags == 0) return
+  try {
+    context.contentResolver.takePersistableUriPermission(uri, modeFlags)
+  } catch (_: SecurityException) {
   }
 }
 

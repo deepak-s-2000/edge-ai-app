@@ -37,6 +37,7 @@ enum class ChatMessageType {
   IMAGE,
   IMAGE_WITH_HISTORY,
   AUDIO_CLIP,
+  DOCUMENT,
   LOADING,
   CLASSIFICATION,
   CONFIG_VALUES_CHANGE,
@@ -249,6 +250,25 @@ class ChatMessageAudioClip(
     val bytesPerFrame = bytesPerSample * 1 // mono
     val totalFrames = audioData.size.toFloat() / bytesPerFrame
     return totalFrames / sampleRate
+  }
+}
+
+/** Chat message for a document file attachment. */
+class ChatMessageDocument(
+  val fileName: String,
+  val mimeType: String,
+  val sizeBytes: Long,
+  override val side: ChatSide,
+  override val latencyMs: Float = 0f,
+) : ChatMessage(type = ChatMessageType.DOCUMENT, side = side, latencyMs = latencyMs) {
+  override fun clone(): ChatMessageDocument {
+    return ChatMessageDocument(
+      fileName = fileName,
+      mimeType = mimeType,
+      sizeBytes = sizeBytes,
+      side = side,
+      latencyMs = latencyMs,
+    )
   }
 }
 

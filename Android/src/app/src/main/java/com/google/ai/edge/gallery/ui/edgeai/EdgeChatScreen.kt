@@ -29,6 +29,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -52,10 +53,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -78,6 +81,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.ai.edge.gallery.data.chathistory.ConversationEntity
 import com.google.ai.edge.gallery.ui.theme.appFontFamily
 
 // ── Top-level chat screen ─────────────────────────────────────────────────────
@@ -89,6 +93,9 @@ fun EdgeChatScreen(
   streamingText: String,
   activeModelName: String,
   drawerOpen: Boolean,
+  historyItems: List<ConversationEntity>,
+  hasMoreHistory: Boolean,
+  currentConversationId: String?,
   onMenuClick: () -> Unit,
   onDrawerClose: () -> Unit,
   onNewChat: () -> Unit,
@@ -97,6 +104,9 @@ fun EdgeChatScreen(
   onVoiceClick: () -> Unit,
   onModelsNav: () -> Unit,
   onSettingsNav: () -> Unit,
+  onHistoryItemClick: (ConversationEntity) -> Unit,
+  onDeleteConversation: (ConversationEntity) -> Unit,
+  onMoreHistory: () -> Unit,
 ) {
   Box(
     modifier = Modifier
@@ -147,10 +157,22 @@ fun EdgeChatScreen(
       )
       EdgeDrawer(
         activeModelName = activeModelName,
+        historyItems = historyItems,
+        hasMoreHistory = hasMoreHistory,
+        currentConversationId = currentConversationId,
         onClose = onDrawerClose,
         onNewChat = {
           onNewChat()
           onDrawerClose()
+        },
+        onHistoryItemClick = { conv ->
+          onHistoryItemClick(conv)
+          // drawer close happens inside openConversation()
+        },
+        onDeleteConversation = onDeleteConversation,
+        onMoreHistory = {
+          onDrawerClose()
+          onMoreHistory()
         },
         onModelsNav = {
           onDrawerClose()
@@ -352,9 +374,6 @@ fun EdgeChatStream(
   streamingText: String,
 ) {
   val listState = rememberLazyListState()
-  // Use a fixed ID for the in-flight streaming bubble so LazyColumn doesn't
-  // destroy and recreate the item on every token — which would cause flicker
-  // and reset the scroll position.
   val streamingMsgId = remember { "__streaming__" }
   val allMessages = remember(messages, streaming, streamingText) {
     if (streaming) {
@@ -376,7 +395,7 @@ fun EdgeChatStream(
       .fillMaxSize()
       .padding(horizontal = 16.dp),
     verticalArrangement = Arrangement.spacedBy(16.dp),
-    contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 16.dp),
+    contentPadding = PaddingValues(vertical = 16.dp),
   ) {
     items(allMessages, key = { it.id }) { msg ->
       val isCurrentlyStreaming = streaming && msg == allMessages.last() && msg.role == "assistant"
@@ -455,13 +474,7 @@ private fun MessageBubble(
         if (isStreaming) {
           StreamingCursor()
         } else {
-          Spacer(Modifier.height(6.dp))
-          Text(
-            text = "42tok · 45tok/s · 180ms TTFT",
-            color = EdgeTextMute,
-            fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace,
-          )
+          Spacer(Modifier.height(4.dp))
         }
       }
     }
@@ -657,7 +670,7 @@ fun EdgeComposer(
       )
       Spacer(Modifier.width(6.dp))
       Text(
-        text = "$activeModelName · 42% RAM · 45 tok/s · 180ms TTFT",
+        text = "$activeModelName · on-device",
         color = EdgeTextMute,
         fontSize = 10.sp,
         fontFamily = FontFamily.Monospace,
@@ -675,19 +688,17 @@ fun EdgeComposer(
 @Composable
 fun EdgeDrawer(
   activeModelName: String,
+  historyItems: List<ConversationEntity>,
+  hasMoreHistory: Boolean,
+  currentConversationId: String?,
   onClose: () -> Unit,
   onNewChat: () -> Unit,
+  onHistoryItemClick: (ConversationEntity) -> Unit,
+  onDeleteConversation: (ConversationEntity) -> Unit,
+  onMoreHistory: () -> Unit,
   onModelsNav: () -> Unit,
   onSettingsNav: () -> Unit,
 ) {
-  val fakeHistory = listOf(
-    "How to train a neural net",
-    "Explain transformers",
-    "Kotlin coroutines guide",
-    "Image segmentation demo",
-    "Summarize this PDF",
-  )
-
   Box(
     modifier = Modifier
       .fillMaxHeight()
@@ -696,191 +707,299 @@ fun EdgeDrawer(
       .border(1.dp, EdgeBorderStrong, RoundedCornerShape(0.dp))
       .windowInsetsPadding(WindowInsets.statusBars)
   ) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-      // Logo
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        EdgeMarkLogo(size = 32.dp)
-        Spacer(Modifier.width(10.dp))
-        Text(
-          text = "edge · ai",
-          color = EdgeText,
-          fontSize = 16.sp,
-          fontFamily = appFontFamily,
-          fontWeight = FontWeight.Bold,
-          letterSpacing = 1.sp,
-        )
-      }
+    Column(modifier = Modifier.fillMaxSize()) {
+      // ── Fixed top section ──────────────────────────────────────────────────
+      Column(modifier = Modifier.padding(16.dp)) {
+        // Logo
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          EdgeMarkLogo(size = 32.dp)
+          Spacer(Modifier.width(10.dp))
+          Text(
+            text = "edge · ai",
+            color = EdgeText,
+            fontSize = 16.sp,
+            fontFamily = appFontFamily,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+          )
+        }
 
-      Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(20.dp))
 
-      // Search bar
-      Box(
-        modifier = Modifier
-          .fillMaxWidth()
-          .clip(RoundedCornerShape(EdgeRadiusSm))
-          .background(EdgeSurface2)
-          .border(1.dp, EdgeBorderStrong, RoundedCornerShape(EdgeRadiusSm))
-          .padding(horizontal = 14.dp, vertical = 10.dp),
-      ) {
-        Text(
-          text = "Search conversations…",
-          color = EdgeTextMute,
-          fontSize = 13.sp,
-          fontFamily = appFontFamily,
-        )
-      }
-
-      Spacer(Modifier.height(12.dp))
-
-      // New chat
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .clip(RoundedCornerShape(EdgeRadiusSm))
-          .background(EdgeAccentSoft)
-          .border(1.dp, EdgeAccentBorder, RoundedCornerShape(EdgeRadiusSm))
-          .clickable(onClick = onNewChat)
-          .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-      ) {
-        Icon(
-          imageVector = Icons.Default.Add,
-          contentDescription = null,
-          tint = EdgeAccent,
-          modifier = Modifier.size(16.dp),
-        )
-        Text(
-          text = "New chat",
-          color = EdgeAccent,
-          fontSize = 13.sp,
-          fontFamily = appFontFamily,
-          fontWeight = FontWeight.SemiBold,
-        )
-      }
-
-      Spacer(Modifier.height(20.dp))
-
-      Text(
-        text = "RECENT",
-        color = EdgeTextMute,
-        fontSize = 9.sp,
-        fontFamily = FontFamily.Monospace,
-        letterSpacing = 2.sp,
-      )
-
-      Spacer(Modifier.height(8.dp))
-
-      fakeHistory.forEach { title ->
-        Text(
-          text = title,
-          color = EdgeTextDim,
-          fontSize = 13.sp,
-          fontFamily = appFontFamily,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
+        // Search bar (placeholder)
+        Box(
           modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(6.dp))
-            .clickable { }
-            .padding(vertical = 8.dp, horizontal = 4.dp),
-        )
-      }
+            .clip(RoundedCornerShape(EdgeRadiusSm))
+            .background(EdgeSurface2)
+            .border(1.dp, EdgeBorderStrong, RoundedCornerShape(EdgeRadiusSm))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        ) {
+          Text(
+            text = "Search conversations…",
+            color = EdgeTextMute,
+            fontSize = 13.sp,
+            fontFamily = appFontFamily,
+          )
+        }
 
-      Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(12.dp))
 
-      // Divider
-      Box(
-        modifier = Modifier
-          .fillMaxWidth()
-          .height(1.dp)
-          .background(EdgeBorderStrong)
-      )
+        // New chat
+        Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(EdgeRadiusSm))
+            .background(EdgeAccentSoft)
+            .border(1.dp, EdgeAccentBorder, RoundedCornerShape(EdgeRadiusSm))
+            .clickable(onClick = onNewChat)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Default.Add,
+            contentDescription = null,
+            tint = EdgeAccent,
+            modifier = Modifier.size(16.dp),
+          )
+          Text(
+            text = "New chat",
+            color = EdgeAccent,
+            fontSize = 13.sp,
+            fontFamily = appFontFamily,
+            fontWeight = FontWeight.SemiBold,
+          )
+        }
 
-      Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(20.dp))
 
-      // Model hub
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .clip(RoundedCornerShape(6.dp))
-          .clickable(onClick = onModelsNav)
-          .padding(horizontal = 4.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-      ) {
-        Text(text = "⬡", color = EdgeTextDim, fontSize = 16.sp)
-        Text(
-          text = "Model hub",
-          color = EdgeTextDim,
-          fontSize = 14.sp,
-          fontFamily = appFontFamily,
-        )
-      }
-
-      // Settings
-      Row(
-        modifier = Modifier
-          .fillMaxWidth()
-          .clip(RoundedCornerShape(6.dp))
-          .clickable(onClick = onSettingsNav)
-          .padding(horizontal = 4.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-      ) {
-        Text(text = "⚙", color = EdgeTextDim, fontSize = 16.sp)
-        Text(
-          text = "Settings",
-          color = EdgeTextDim,
-          fontSize = 14.sp,
-          fontFamily = appFontFamily,
-        )
-      }
-
-      Spacer(Modifier.height(8.dp))
-
-      // Footer
-      Box(
-        modifier = Modifier
-          .fillMaxWidth()
-          .clip(RoundedCornerShape(6.dp))
-          .background(EdgeSurface2)
-          .padding(horizontal = 12.dp, vertical = 10.dp),
-      ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Box(
-            modifier = Modifier
-              .size(28.dp)
-              .clip(CircleShape)
-              .background(EdgeAccentSoft)
-              .border(1.dp, EdgeAccentBorder, CircleShape),
-            contentAlignment = Alignment.Center,
-          ) {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Text(
+            text = "RECENT",
+            color = EdgeTextMute,
+            fontSize = 9.sp,
+            fontFamily = FontFamily.Monospace,
+            letterSpacing = 2.sp,
+            modifier = Modifier.weight(1f),
+          )
+          if (historyItems.isEmpty()) {
             Text(
-              text = "ME",
-              color = EdgeAccent,
+              text = "No history",
+              color = EdgeTextMute.copy(alpha = 0.5f),
               fontSize = 9.sp,
               fontFamily = FontFamily.Monospace,
-              fontWeight = FontWeight.Bold,
-            )
-          }
-          Spacer(Modifier.width(10.dp))
-          Column {
-            Text(
-              text = "Local device",
-              color = EdgeText,
-              fontSize = 12.sp,
-              fontFamily = appFontFamily,
-              fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-              text = "No account",
-              color = EdgeTextMute,
-              fontSize = 11.sp,
-              fontFamily = appFontFamily,
             )
           }
         }
+
+        Spacer(Modifier.height(4.dp))
+      }
+
+      // ── Scrollable history list ────────────────────────────────────────────
+      LazyColumn(
+        modifier = Modifier.weight(1f),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+      ) {
+        items(historyItems, key = { it.id }) { conv ->
+          DrawerHistoryItem(
+            conversation = conv,
+            isActive = conv.id == currentConversationId,
+            onClick = { onHistoryItemClick(conv) },
+            onDelete = { onDeleteConversation(conv) },
+          )
+        }
+
+        if (hasMoreHistory) {
+          item {
+            Row(
+              modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .clickable(onClick = onMoreHistory)
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              Icon(
+                imageVector = Icons.Default.MoreHoriz,
+                contentDescription = null,
+                tint = EdgeTextMute,
+                modifier = Modifier.size(16.dp),
+              )
+              Text(
+                text = "View all history",
+                color = EdgeTextMute,
+                fontSize = 12.sp,
+                fontFamily = appFontFamily,
+              )
+            }
+          }
+        }
+      }
+
+      // ── Fixed bottom section ───────────────────────────────────────────────
+      Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+        Box(
+          modifier = Modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(EdgeBorderStrong)
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        // Model hub
+        Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onModelsNav)
+            .padding(horizontal = 4.dp, vertical = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+          Text(text = "⬡", color = EdgeTextDim, fontSize = 16.sp)
+          Text(
+            text = "Model hub",
+            color = EdgeTextDim,
+            fontSize = 14.sp,
+            fontFamily = appFontFamily,
+          )
+        }
+
+        // Settings
+        Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onSettingsNav)
+            .padding(horizontal = 4.dp, vertical = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+          Text(text = "⚙", color = EdgeTextDim, fontSize = 16.sp)
+          Text(
+            text = "Settings",
+            color = EdgeTextDim,
+            fontSize = 14.sp,
+            fontFamily = appFontFamily,
+          )
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Footer
+        Box(
+          modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(EdgeSurface2)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+              modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(EdgeAccentSoft)
+                .border(1.dp, EdgeAccentBorder, CircleShape),
+              contentAlignment = Alignment.Center,
+            ) {
+              Text(
+                text = "ME",
+                color = EdgeAccent,
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+              )
+            }
+            Spacer(Modifier.width(10.dp))
+            Column {
+              Text(
+                text = "Local device",
+                color = EdgeText,
+                fontSize = 12.sp,
+                fontFamily = appFontFamily,
+                fontWeight = FontWeight.SemiBold,
+              )
+              Text(
+                text = "No account",
+                color = EdgeTextMute,
+                fontSize = 11.sp,
+                fontFamily = appFontFamily,
+              )
+            }
+          }
+        }
+
+        Spacer(Modifier.height(8.dp))
+      }
+    }
+  }
+}
+
+// ── Drawer history item ────────────────────────────────────────────────────────
+
+@Composable
+private fun DrawerHistoryItem(
+  conversation: ConversationEntity,
+  isActive: Boolean,
+  onClick: () -> Unit,
+  onDelete: () -> Unit,
+) {
+  var showDelete by remember { mutableStateOf(false) }
+
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clip(RoundedCornerShape(6.dp))
+      .background(
+        if (isActive) EdgeAccentSoft else Color.Transparent
+      )
+      .pointerInput(Unit) {
+        detectTapGestures(
+          onTap = { onClick() },
+          onLongPress = { showDelete = !showDelete },
+        )
+      }
+      .padding(horizontal = 4.dp, vertical = 6.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Column(modifier = Modifier.weight(1f)) {
+      Text(
+        text = conversation.title,
+        color = if (isActive) EdgeAccent else EdgeTextDim,
+        fontSize = 13.sp,
+        fontFamily = appFontFamily,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Text(
+        text = conversation.updatedAt.toRelativeTime(),
+        color = EdgeTextMute,
+        fontSize = 10.sp,
+        fontFamily = FontFamily.Monospace,
+      )
+    }
+
+    if (showDelete) {
+      IconButton(
+        onClick = {
+          showDelete = false
+          onDelete()
+        },
+        modifier = Modifier.size(28.dp),
+      ) {
+        Icon(
+          imageVector = Icons.Default.Delete,
+          contentDescription = "Delete",
+          tint = Color(0xFFFF6B6B),
+          modifier = Modifier.size(14.dp),
+        )
       }
     }
   }

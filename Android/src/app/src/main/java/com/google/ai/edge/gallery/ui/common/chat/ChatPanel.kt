@@ -405,6 +405,9 @@ fun ChatPanel(
                       // Audio clip.
                       is ChatMessageAudioClip -> MessageBodyAudioClip(message = message)
 
+                      // Document attachment.
+                      is ChatMessageDocument -> MessageBodyDocument(message = message)
+
                       // Classification result
                       is ChatMessageClassification ->
                         MessageBodyClassification(

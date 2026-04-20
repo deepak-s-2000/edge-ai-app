@@ -218,12 +218,22 @@ fun EdgeAiScreen(
         chatHistoryViewModel.saveUserMessage(convId, userVisibleText)
         waitingForAssistant = true
 
-        val imageBitmaps = loadImageAttachmentBitmaps(context, attachments)
+        // Only decode image bitmaps when the active model actually supports vision input.
+        // Passing bitmaps to a text-only LiteRT session crashes the native runtime.
+        val imageBitmaps = if (model.llmSupportImage) {
+          loadImageAttachmentBitmaps(context, attachments)
+        } else {
+          emptyList()
+        }
+
         val llmInput = buildString {
           append(promptText)
           val docs = attachments.filterIsInstance<EdgeAttachment.Document>()
           val imgs = attachments.filterIsInstance<EdgeAttachment.Image>()
-          if (imgs.isNotEmpty()) append("\n[${imgs.size} image(s) attached]")
+          // For text-only models, include image filenames as text context instead
+          if (imgs.isNotEmpty() && !model.llmSupportImage) {
+            append("\n[${imgs.size} image(s) attached: ${imgs.joinToString { it.fileName }}]")
+          }
           if (docs.isNotEmpty()) append("\n[Attached files: ${docs.joinToString { it.fileName }}]")
           append(buildAttachmentPromptContext(context, attachments))
         }
@@ -235,7 +245,7 @@ fun EdgeAiScreen(
         llmChatViewModel.generateResponse(
           model = model,
           input = llmInput,
-          images = imageBitmaps,
+          images = imageBitmaps,   // empty list for text-only models — safe to pass
           onError = {},
         )
       } catch (e: Exception) {

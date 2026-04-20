@@ -2,7 +2,6 @@ package com.google.ai.edge.gallery.ui.edgeai
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
@@ -240,13 +239,8 @@ private fun ImagePreviewChip(uri: Uri) {
   LaunchedEffect(uri) {
     bitmap = withContext(Dispatchers.IO) {
       try {
-        context.contentResolver.openInputStream(uri)?.use { stream ->
-          BitmapFactory.decodeStream(
-            stream,
-            null,
-            BitmapFactory.Options().apply { inSampleSize = 4 },
-          )
-        }
+        // 200px is plenty for a 72dp thumbnail — keeps memory low
+        decodeSampledBitmapFromUri(context, uri, 200, 200)
       } catch (_: Exception) {
         null
       }
@@ -339,13 +333,8 @@ private fun SentImageBubble(uri: Uri) {
   LaunchedEffect(uri) {
     bitmap = withContext(Dispatchers.IO) {
       try {
-        context.contentResolver.openInputStream(uri)?.use { stream ->
-          BitmapFactory.decodeStream(
-            stream,
-            null,
-            BitmapFactory.Options().apply { inSampleSize = 2 },
-          )
-        }
+        // Use a bounded max size to avoid OOM on high-res camera photos.
+        decodeSampledBitmapFromUri(context, uri, 800, 800)
       } catch (_: Exception) {
         null
       }

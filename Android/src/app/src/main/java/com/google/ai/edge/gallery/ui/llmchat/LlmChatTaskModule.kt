@@ -80,7 +80,7 @@ class LlmChatTask @Inject constructor() : CustomTask {
     model.runtimeHelper.initialize(
       context = context,
       model = model,
-      supportImage = false,
+      supportImage = model.llmSupportImage,
       supportAudio = false,
       onDone = onDone,
       coroutineScope = coroutineScope,
